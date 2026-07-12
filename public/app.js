@@ -5,7 +5,7 @@ const toastRoot = document.querySelector('#toast-root');
 
 let modalEscapeHandler = null;
 
-const state = { admin: false, bases: [], ingredients: [], filters: { sweet: null, acid: null, strength: null, base: '', search: '' } };
+const state = { admin: false, bases: [], ingredients: [], recipesAvailable: true, filters: { sweet: null, acid: null, strength: null, base: '', search: '' } };
 
 const SUPABASE_URL = 'https://oordtnwneordvusqvcds.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_UVriJo56omoyLryAnfMYHw_ASk5fRHg';
@@ -14,6 +14,7 @@ const SESSION_KEY = 'home-bar-session';
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
 const normalizeText = value => String(value ?? '').trim().toLowerCase();
+const splitLines = value => String(value ?? '').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
 const recipeBook = {
   'Негрони': { glass:'Рокс со льдом', garnish:'Апельсиновая цедра', proportions:['Джин — 30 мл','Кампари — 30 мл','Красный вермут — 30 мл'], method:'Смешайте ингредиенты со льдом в стакане для смешивания, перелейте в рокс и украсьте цедрой.' },
   'Бэзил Смэш': { glass:'Рокс или купе', garnish:'Верхушка базилика', proportions:['Джин — 50 мл','Лимонный сок — 25 мл','Сахарный сироп — 20 мл','Базилик — 8–10 листьев'], method:'Аккуратно разомните базилик с сиропом, добавьте джин, лимон и лёд. Встряхните и процедите.' },
@@ -57,12 +58,47 @@ async function sbFetch(path, options = {}, admin = false) {
 }
 const normalizeCocktail = row => ({
   ...row, base: row.base?.name || row.base || '',
+  recipe: row.recipe || null,
   ingredients: (row.cocktail_ingredients || row.ingredients || []).map(x => x.ingredient || x)
 });
 const cocktailSelect = 'id,name,photo,sweetness,acidity,strength,base_id,base:bases(id,name),cocktail_ingredients(ingredient:ingredients(id,name,in_stock))';
+const isMissingRecipeTable = err => /cocktail_recipes|schema cache|relation/i.test(err.message || '');
+function hasRecipeData(recipe = {}) {
+  return Boolean((recipe.proportions || []).length || recipe.method || recipe.glass || recipe.garnish || recipe.note);
+}
+function recipeFallback(c) {
+  return recipeBook[c.name] || {
+    glass:'Любимый бокал',
+    garnish:'По настроению',
+    proportions:c.ingredients.map(i=>`${i.name} — по вкусу`),
+    method:'Подготовьте ингредиенты, охладите бокал и смешайте напиток в стиле, который лучше подходит рецепту: встряхните с соками или перемешайте прозрачные крепкие ингредиенты со льдом.',
+    note:''
+  };
+}
+function recipeFor(c) {
+  const fallback = recipeFallback(c);
+  if (!hasRecipeData(c.recipe)) return fallback;
+  return {
+    proportions:c.recipe.proportions?.length ? c.recipe.proportions : fallback.proportions,
+    method:c.recipe.method || fallback.method,
+    glass:c.recipe.glass || fallback.glass,
+    garnish:c.recipe.garnish || fallback.garnish,
+    note:c.recipe.note || ''
+  };
+}
+async function fetchRecipeMap() {
+  if (!state.recipesAvailable) return new Map();
+  try {
+    const rows = await sbFetch('/rest/v1/cocktail_recipes?select=*');
+    return new Map(rows.map(row => [row.cocktail_id, row]));
+  } catch (err) {
+    if (isMissingRecipeTable(err)) { state.recipesAvailable = false; return new Map(); }
+    throw err;
+  }
+}
 async function fetchCocktails(includeUnavailable = false) {
-  const rows = await sbFetch(`/rest/v1/cocktails?select=${encodeURIComponent(cocktailSelect)}&order=name.asc`);
-  const normalized = rows.map(normalizeCocktail);
+  const [rows, recipeMap] = await Promise.all([sbFetch(`/rest/v1/cocktails?select=${encodeURIComponent(cocktailSelect)}&order=name.asc`), fetchRecipeMap()]);
+  const normalized = rows.map(row => normalizeCocktail({...row, recipe:recipeMap.get(row.id) || null}));
   return includeUnavailable ? normalized : normalized.filter(c => c.ingredients.every(i => i.in_stock));
 }
 async function uploadPhoto(file) {
@@ -74,6 +110,24 @@ async function uploadPhoto(file) {
   await sbFetch(`/storage/v1/object/cocktail-photos/${filename}`, { method:'POST', headers:{'Content-Type':file.type,'x-upsert':'false'}, body:file }, true);
   return `${SUPABASE_URL}/storage/v1/object/public/cocktail-photos/${filename}`;
 }
+async function saveRecipe(cocktailId, recipe = {}) {
+  if (!state.recipesAvailable) throw new Error('Чтобы сохранять рецепты, сначала выполните supabase/add-cocktail-recipes.sql в Supabase SQL Editor');
+  const payload = {
+    cocktail_id: cocktailId,
+    proportions: recipe.proportions || [],
+    method: recipe.method || null,
+    glass: recipe.glass || null,
+    garnish: recipe.garnish || null,
+    note: recipe.note || null
+  };
+  try {
+    if (!hasRecipeData(payload)) return sbFetch(`/rest/v1/cocktail_recipes?cocktail_id=eq.${cocktailId}`, { method:'DELETE', headers:{Prefer:'return=minimal'} }, true);
+    return sbFetch('/rest/v1/cocktail_recipes?on_conflict=cocktail_id', { method:'POST', headers:{'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'}, body:JSON.stringify(payload) }, true);
+  } catch(err) {
+    if (isMissingRecipeTable(err)) { state.recipesAvailable=false; throw new Error('Чтобы сохранять рецепты, сначала выполните supabase/add-cocktail-recipes.sql в Supabase SQL Editor'); }
+    throw err;
+  }
+}
 async function saveRemoteCocktail(data, file, id = null) {
   const photo = await uploadPhoto(file);
   const payload = { name:data.name.trim(), base_id:data.base_id, sweetness:data.sweetness, acidity:data.acidity, strength:data.strength };
@@ -84,6 +138,7 @@ async function saveRemoteCocktail(data, file, id = null) {
   if (!cocktailId) throw new Error('Не удалось сохранить коктейль');
   if (id) await sbFetch(`/rest/v1/cocktail_ingredients?cocktail_id=eq.${id}`, { method:'DELETE', headers:{Prefer:'return=minimal'} }, true);
   await sbFetch('/rest/v1/cocktail_ingredients', { method:'POST', headers:{'Content-Type':'application/json','Prefer':'return=minimal'}, body:JSON.stringify(data.ingredients.map(ingredient_id => ({cocktail_id:cocktailId,ingredient_id}))) }, true);
+  if (state.recipesAvailable) await saveRecipe(cocktailId, data.recipe);
   return cocktailId;
 }
 async function request(url, options = {}) {
@@ -197,12 +252,7 @@ function cocktailCard(c, index) {
 }
 function scorePill(label,value){return `<span><b>${label}</b>${'◆'.repeat(value)}${'◇'.repeat(5-value)}</span>`;}
 function cocktailDetailsModal(c) {
-  const recipe = recipeBook[c.name] || {
-    glass:'Любимый бокал',
-    garnish:'По настроению',
-    proportions:c.ingredients.map(i=>`${i.name} — по вкусу`),
-    method:'Подготовьте ингредиенты, охладите бокал и смешайте напиток в стиле, который лучше подходит рецепту: встряхните с соками или перемешайте прозрачные крепкие ингредиенты со льдом.'
-  };
+  const recipe = recipeFor(c);
   showModal(`<div class="detail-head"><div><p class="eyebrow">${escapeHtml(c.base)}</p><h2>${escapeHtml(c.name)}</h2></div><button class="icon-button" type="button" data-close aria-label="Закрыть">×</button></div>
     <div class="detail-grid">
       <section><h3>Пропорции</h3><ul class="detail-list">${recipe.proportions.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul></section>
@@ -210,6 +260,7 @@ function cocktailDetailsModal(c) {
       <section class="full"><h3>Как готовить</h3><p>${escapeHtml(recipe.method)}</p></section>
       <section><h3>Бокал</h3><p>${escapeHtml(recipe.glass)}</p></section>
       <section><h3>Украшение</h3><p>${escapeHtml(recipe.garnish)}</p></section>
+      ${recipe.note ? `<section class="full"><h3>Заметка</h3><p>${escapeHtml(recipe.note)}</p></section>` : ''}
       <section class="full"><h3>Ингредиенты в меню</h3><p class="ingredients">${c.ingredients.map(x=>escapeHtml(x.name)).join(' · ')}</p></section>
     </div>`, true);
   modalRoot.querySelector('[data-close]').onclick=closeModal;
@@ -298,17 +349,26 @@ function confirmBaseDelete(base,usageCount=0) {
 }
 
 async function editorPage(id) {
-  const [bases, ingredients, cocktail] = await Promise.all([request('/api/bases'),request('/api/ingredients'),id?request(`/api/cocktails/${id}`):Promise.resolve(null)]);
+  const [bases, ingredients, cocktail] = await Promise.all([request('/api/bases'),request('/api/ingredients'),id?request(`/api/cocktails/${id}`):Promise.resolve(null),fetchRecipeMap().then(()=>null)]);
   state.bases=bases;state.ingredients=ingredients; const selected=(cocktail?.ingredients||[]).map(x=>x.id);
+  const recipe = cocktail ? recipeFor(cocktail) : { proportions:[], method:'', glass:'', garnish:'', note:'' };
+  const recipeAttrs = state.recipesAvailable ? '' : 'disabled';
+  const recipeNotice = state.recipesAvailable ? '' : '<p class="notice">Поля рецепта появятся после запуска supabase/add-cocktail-recipes.sql в Supabase SQL Editor.</p>';
   app.innerHTML=`<section class="admin-hero"><div><p class="eyebrow">${id?'Редактирование':'Новый рецепт'}</p><h1>${id?escapeHtml(cocktail.name):'Добавить коктейль'}</h1></div><div class="admin-actions"><a class="button secondary" href="#/manage">К списку</a></div></section>
   <div class="editor-layout"><form class="form-card" id="cocktail-form"><div class="form-grid">
     <div class="form-group full"><label>Название *</label><input class="field" name="name" value="${escapeHtml(cocktail?.name||'')}" placeholder="Например, Южный ветер" required></div>
     <div class="form-group"><label>Основа *</label><select name="base_id" required><option value="">Выберите основу</option>${bases.map(b=>`<option value="${b.id}" ${b.id===cocktail?.base_id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}</select><button class="button secondary small inline-add" id="new-base" type="button">＋ Добавить основу</button></div>
     <div class="form-group"><label>Фото (JPG, PNG, WEBP · до 5 МБ)</label><label class="upload"><input type="file" name="photo" accept="image/jpeg,image/png,image/webp"><strong>${cocktail?.photo?'Заменить фото':'Выбрать фото'}</strong><span id="file-name">${cocktail?.photo?'Текущее фото сохранено':'или перетащите сюда'}</span></label></div>
     ${['sweetness','acidity','strength'].map((key,i)=>`<div class="form-group"><label>${['Сладость','Кислота','Крепость'][i]}</label><div class="range-field"><input type="range" name="${key}" min="0" max="5" value="${cocktail?.[key]??[2,3,3][i]}"><output>${cocktail?.[key]??[2,3,3][i]}</output></div></div>`).join('')}
+    <div class="form-group full"><div class="section-title"><span>Рецепт</span><small>будет показан в карточке коктейля</small></div>${recipeNotice}</div>
+    <div class="form-group full"><label>Пропорции</label><textarea class="field" name="recipe_proportions" rows="5" placeholder="Джин — 50 мл&#10;Лимонный сок — 25 мл" ${recipeAttrs}>${escapeHtml(recipe.proportions.join('\n'))}</textarea></div>
+    <div class="form-group full"><label>Как готовить</label><textarea class="field" name="recipe_method" rows="4" placeholder="Встряхните ингредиенты со льдом и процедите в охлаждённый бокал." ${recipeAttrs}>${escapeHtml(recipe.method)}</textarea></div>
+    <div class="form-group"><label>Бокал</label><input class="field" name="recipe_glass" value="${escapeHtml(recipe.glass)}" placeholder="Рокс, купе, хайбол…" ${recipeAttrs}></div>
+    <div class="form-group"><label>Украшение</label><input class="field" name="recipe_garnish" value="${escapeHtml(recipe.garnish)}" placeholder="Цедра, лайм, мята…" ${recipeAttrs}></div>
+    <div class="form-group full"><label>Заметка</label><textarea class="field" name="recipe_note" rows="3" placeholder="Например: если хочется суше — уменьшить сироп." ${recipeAttrs}>${escapeHtml(recipe.note)}</textarea></div>
     <div class="form-group full"><label>Ингредиенты *</label><input class="field" id="ingredient-search" autocomplete="off" placeholder="Начните вводить название…"><div id="suggestions"></div><div class="chips" id="chips"></div><button class="button secondary small" id="new-ingredient" type="button" style="margin-top:12px">＋ Добавить новый ингредиент</button></div>
     <div class="form-group full"><p class="error-text" id="form-error"></p><button class="button" type="submit">${id?'Сохранить изменения':'Сохранить коктейль'}</button></div>
-  </div></form><aside class="side-card"><p class="eyebrow">Подсказка</p><h3>Баланс — это всё</h3><p>Оценки вкуса используются в строгом фильтре. Если напиток универсальный, ориентируйтесь на его доминирующий характер.</p><p>Ингредиент в стоп-листе автоматически скроет все связанные с ним коктейли с гостевой страницы.</p></aside></div>`;
+  </div></form><aside class="side-card"><p class="eyebrow">Подсказка</p><h3>Баланс — это всё</h3><p>Оценки вкуса используются в строгом фильтре. Если напиток универсальный, ориентируйтесь на его доминирующий характер.</p><p>Заполняйте рецепт коротко: пропорции строками, затем один понятный способ приготовления. Так карточка будет читаться с телефона у барной стойки.</p><p>Ингредиент в стоп-листе автоматически скроет все связанные с ним коктейли с гостевой страницы.</p></aside></div>`;
   const form=document.querySelector('#cocktail-form');
   form.querySelectorAll('input[type=range]').forEach(r=>r.oninput=e=>e.target.nextElementSibling.value=e.target.value);
   form.photo.onchange=e=>document.querySelector('#file-name').textContent=e.target.files[0]?.name||'или перетащите сюда';
@@ -317,7 +377,7 @@ async function editorPage(id) {
   const search=document.querySelector('#ingredient-search'),suggestions=document.querySelector('#suggestions');
   search.oninput=e=>{const q=e.target.value.trim().toLowerCase();const found=q?ingredients.filter(i=>!selected.includes(i.id)&&i.name.toLowerCase().includes(q)).slice(0,7):[];suggestions.className=found.length?'suggestions':'';suggestions.innerHTML=found.map(i=>`<button class="suggestion" type="button" data-add="${i.id}">${escapeHtml(i.name)}</button>`).join('');suggestions.querySelectorAll('[data-add]').forEach(b=>b.onclick=x=>{selected.push(Number(x.currentTarget.dataset.add));search.value='';suggestions.innerHTML='';suggestions.className='';renderChips();});};
   document.querySelector('#new-ingredient').onclick=()=>newIngredientModal(ingredients,selected,renderChips);
-  form.onsubmit=async e=>{e.preventDefault();const error=document.querySelector('#form-error');error.textContent='';const submit=form.querySelector('[type=submit]');submit.disabled=true;submit.textContent='Сохраняем…';try{const fd=new FormData(form);const data={name:fd.get('name'),base_id:Number(fd.get('base_id')),sweetness:Number(fd.get('sweetness')),acidity:Number(fd.get('acidity')),strength:Number(fd.get('strength')),ingredients:selected};const payload=new FormData();payload.set('data',JSON.stringify(data));if(fd.get('photo')?.size)payload.set('photo',fd.get('photo'));await request(id?`/api/cocktails/${id}`:'/api/cocktails',{method:id?'PUT':'POST',body:payload});toast(id?'Изменения сохранены':'Коктейль добавлен в меню');location.hash='/manage';}catch(err){error.textContent=err.message;submit.disabled=false;submit.textContent=id?'Сохранить изменения':'Сохранить коктейль';}};
+  form.onsubmit=async e=>{e.preventDefault();const error=document.querySelector('#form-error');error.textContent='';const submit=form.querySelector('[type=submit]');submit.disabled=true;submit.textContent='Сохраняем…';try{const fd=new FormData(form);const data={name:fd.get('name'),base_id:Number(fd.get('base_id')),sweetness:Number(fd.get('sweetness')),acidity:Number(fd.get('acidity')),strength:Number(fd.get('strength')),ingredients:selected,recipe:{proportions:splitLines(fd.get('recipe_proportions')),method:String(fd.get('recipe_method')||'').trim(),glass:String(fd.get('recipe_glass')||'').trim(),garnish:String(fd.get('recipe_garnish')||'').trim(),note:String(fd.get('recipe_note')||'').trim()}};const payload=new FormData();payload.set('data',JSON.stringify(data));if(fd.get('photo')?.size)payload.set('photo',fd.get('photo'));await request(id?`/api/cocktails/${id}`:'/api/cocktails',{method:id?'PUT':'POST',body:payload});toast(id?'Изменения сохранены':'Коктейль добавлен в меню');location.hash='/manage';}catch(err){error.textContent=err.message;submit.disabled=false;submit.textContent=id?'Сохранить изменения':'Сохранить коктейль';}};
 }
 function newIngredientModal(ingredients,selected,render){showModal(`<p class="eyebrow">Новая позиция</p><h2>Добавить ингредиент</h2><form id="ingredient-form"><input class="field" name="name" placeholder="Название" required autofocus><p class="error-text"></p><div class="modal-actions"><button class="button secondary" type="button" data-close>Отмена</button><button class="button">Добавить</button></div></form>`);modalRoot.querySelector('[data-close]').onclick=closeModal;modalRoot.querySelector('form').onsubmit=async e=>{e.preventDefault();try{const item=await request('/api/ingredients',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:new FormData(e.currentTarget).get('name')})});ingredients.push(item);selected.push(item.id);closeModal();render();toast('Ингредиент добавлен');}catch(err){e.currentTarget.querySelector('.error-text').textContent=err.message;}};}
 
