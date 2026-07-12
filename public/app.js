@@ -80,7 +80,20 @@ async function request(url, options = {}) {
     localStorage.setItem(SESSION_KEY, JSON.stringify(data)); return { admin:true };
   }
   if (parsed.pathname === '/api/logout') { const session=await activeSession(); if(session) await sbFetch('/auth/v1/logout',{method:'POST'},true).catch(()=>{}); localStorage.removeItem(SESSION_KEY); return {admin:false}; }
-  if (parsed.pathname === '/api/bases') return sbFetch('/rest/v1/bases?select=*&order=id.asc');
+  if (parsed.pathname === '/api/bases' && method === 'GET') return sbFetch('/rest/v1/bases?select=*&order=id.asc');
+  if (parsed.pathname === '/api/bases' && method === 'POST') {
+    const name = String(jsonInput().name || '').trim();
+    if (!name) throw new Error('Введите название основы');
+    const rows = await sbFetch('/rest/v1/bases', { method:'POST', headers:{'Content-Type':'application/json','Prefer':'return=representation'}, body:JSON.stringify({name}) }, true);
+    return rows[0];
+  }
+  const baseMatch=parsed.pathname.match(/^\/api\/bases\/(\d+)$/);
+  if(baseMatch&&method==='PATCH'){
+    const name = String(jsonInput().name || '').trim();
+    if (!name) throw new Error('Введите название основы');
+    const rows=await sbFetch(`/rest/v1/bases?id=eq.${baseMatch[1]}`,{method:'PATCH',headers:{'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify({name})},true);return rows[0];
+  }
+  if(baseMatch&&method==='DELETE') return sbFetch(`/rest/v1/bases?id=eq.${baseMatch[1]}`,{method:'DELETE',headers:{Prefer:'return=minimal'}},true);
   if (parsed.pathname === '/api/cocktails' && method === 'GET') {
     let rows = await fetchCocktails(false);
     const map = {sweet:'sweetness',acid:'acidity',strength:'strength'};
@@ -112,6 +125,7 @@ function setNav() {
   nav.innerHTML = state.admin ? `
     <a class="nav-link ${route === '/' ? 'active':''}" href="#/">Бар</a>
     <a class="nav-link ${route === '/manage' ? 'active':''}" href="#/manage"><span>Коктейли</span> ◇</a>
+    <a class="nav-link ${route === '/bases' ? 'active':''}" href="#/bases"><span>Основы</span> ✦</a>
     <a class="nav-link ${route === '/inventory' ? 'active':''}" href="#/inventory"><span>Стоп-лист</span> ◌</a>
     <a class="nav-link ${route.startsWith('/editor') ? 'active':''}" href="#/editor"><span>Добавить</span> ＋</a>
     <button class="icon-button" id="settings" title="Настройки">⚙</button>
@@ -203,10 +217,34 @@ async function inventoryPage() {
 
 async function managePage() {
   const rows=await request('/api/admin/cocktails');
-  app.innerHTML=`<section class="admin-hero"><div><p class="eyebrow">Коллекция</p><h1>Коктейли</h1></div><div class="admin-actions"><a class="button" href="#/editor">＋ Новый коктейль</a></div></section><section class="admin-list">${rows.map(c=>`<div class="admin-list-row"><div><strong>${escapeHtml(c.name)}</strong><br><small>${escapeHtml(c.base)} · ${c.ingredients.length} ${plural(c.ingredients.length,'ингредиент','ингредиента','ингредиентов')}</small></div><div class="row-actions"><a class="button secondary small" href="#/editor/${c.id}">Изменить</a><button class="button danger small" data-delete="${c.id}" data-name="${escapeHtml(c.name)}">Удалить</button></div></div>`).join('')}</section>`;
+  app.innerHTML=`<section class="admin-hero"><div><p class="eyebrow">Коллекция</p><h1>Коктейли</h1></div><div class="admin-actions"><a class="button secondary" href="#/bases">Основы</a><a class="button" href="#/editor">＋ Новый коктейль</a></div></section><section class="admin-list">${rows.map(c=>`<div class="admin-list-row"><div><strong>${escapeHtml(c.name)}</strong><br><small>${escapeHtml(c.base)} · ${c.ingredients.length} ${plural(c.ingredients.length,'ингредиент','ингредиента','ингредиентов')}</small></div><div class="row-actions"><a class="button secondary small" href="#/editor/${c.id}">Изменить</a><button class="button danger small" data-delete="${c.id}" data-name="${escapeHtml(c.name)}">Удалить</button></div></div>`).join('')}</section>`;
   document.querySelectorAll('[data-delete]').forEach(btn=>btn.onclick=e=>confirmDelete(Number(e.currentTarget.dataset.delete),e.currentTarget.dataset.name));
 }
 function confirmDelete(id,name){showModal(`<p class="eyebrow">Безвозвратное действие</p><h2>Удалить коктейль?</h2><p>«${escapeHtml(name)}» исчезнет из меню. Ингредиенты останутся в инвентаре.</p><div class="modal-actions"><button class="button secondary" data-close>Отмена</button><button class="button danger" data-confirm>Удалить</button></div>`);modalRoot.querySelector('[data-close]').onclick=closeModal;modalRoot.querySelector('[data-confirm]').onclick=async()=>{await request(`/api/cocktails/${id}`,{method:'DELETE'});closeModal();toast('Коктейль удалён');managePage();};}
+
+async function basesPage() {
+  const [bases, cocktails] = await Promise.all([request('/api/bases'), request('/api/admin/cocktails')]);
+  state.bases=bases;
+  const usage = new Map();
+  cocktails.forEach(c=>usage.set(c.base_id,(usage.get(c.base_id)||0)+1));
+  app.innerHTML=`<section class="admin-hero"><div><p class="eyebrow">Справочник</p><h1>Основы</h1></div><div class="admin-actions"><button class="button" id="new-base">＋ Новая основа</button></div></section>
+    <section class="admin-list">${bases.map(b=>{const count=usage.get(b.id)||0;return `<div class="admin-list-row"><div><strong>${escapeHtml(b.name)}</strong><br><small>${count ? `${count} ${plural(count,'коктейль','коктейля','коктейлей')}` : 'Пока не используется'}</small></div><div class="row-actions"><button class="button secondary small" data-edit-base="${b.id}">Изменить</button><button class="button danger small" data-delete-base="${b.id}" ${count?'disabled title="Сначала переназначьте коктейли на другую основу"':''}>Удалить</button></div></div>`}).join('') || '<div class="empty"><b>Основ пока нет</b>Добавьте первую основу для коктейлей.</div>'}</section>`;
+  document.querySelector('#new-base').onclick=()=>baseModal(null, basesPage);
+  document.querySelectorAll('[data-edit-base]').forEach(btn=>btn.onclick=e=>baseModal(bases.find(b=>b.id===Number(e.currentTarget.dataset.editBase)), basesPage));
+  document.querySelectorAll('[data-delete-base]').forEach(btn=>btn.onclick=e=>confirmBaseDelete(bases.find(b=>b.id===Number(e.currentTarget.dataset.deleteBase)), usage.get(Number(e.currentTarget.dataset.deleteBase))||0));
+}
+function baseModal(base=null,onSaved=()=>{}) {
+  showModal(`<p class="eyebrow">${base?'Редактирование':'Новая основа'}</p><h2>${base?'Изменить основу':'Добавить основу'}</h2><p>Название появится в фильтре на главной и в форме коктейля.</p><form id="base-form"><input class="field" name="name" value="${escapeHtml(base?.name||'')}" placeholder="Например, Мескаль" required autofocus><p class="error-text"></p><div class="modal-actions"><button class="button secondary" type="button" data-close>Отмена</button><button class="button">${base?'Сохранить':'Добавить'}</button></div></form>`);
+  modalRoot.querySelector('[data-close]').onclick=closeModal;
+  modalRoot.querySelector('form').onsubmit=async e=>{e.preventDefault();const error=e.currentTarget.querySelector('.error-text');error.textContent='';try{const payload={name:new FormData(e.currentTarget).get('name')};const item=await request(base?`/api/bases/${base.id}`:'/api/bases',{method:base?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});state.bases=[];closeModal();await onSaved(item);toast(base?'Основа обновлена':'Основа добавлена');}catch(err){error.textContent=err.message;}};
+}
+function confirmBaseDelete(base,usageCount=0) {
+  if (!base) return;
+  if (usageCount) { toast('Сначала переназначьте коктейли на другую основу','error'); return; }
+  showModal(`<p class="eyebrow">Безвозвратное действие</p><h2>Удалить основу?</h2><p>«${escapeHtml(base.name)}» исчезнет из списка основ.</p><div class="modal-actions"><button class="button secondary" data-close>Отмена</button><button class="button danger" data-confirm>Удалить</button></div>`);
+  modalRoot.querySelector('[data-close]').onclick=closeModal;
+  modalRoot.querySelector('[data-confirm]').onclick=async()=>{try{await request(`/api/bases/${base.id}`,{method:'DELETE'});state.bases=[];closeModal();toast('Основа удалена');basesPage();}catch(err){toast(err.message,'error');}};
+}
 
 async function editorPage(id) {
   const [bases, ingredients, cocktail] = await Promise.all([request('/api/bases'),request('/api/ingredients'),id?request(`/api/cocktails/${id}`):Promise.resolve(null)]);
@@ -214,7 +252,7 @@ async function editorPage(id) {
   app.innerHTML=`<section class="admin-hero"><div><p class="eyebrow">${id?'Редактирование':'Новый рецепт'}</p><h1>${id?escapeHtml(cocktail.name):'Добавить коктейль'}</h1></div><div class="admin-actions"><a class="button secondary" href="#/manage">К списку</a></div></section>
   <div class="editor-layout"><form class="form-card" id="cocktail-form"><div class="form-grid">
     <div class="form-group full"><label>Название *</label><input class="field" name="name" value="${escapeHtml(cocktail?.name||'')}" placeholder="Например, Южный ветер" required></div>
-    <div class="form-group"><label>Основа *</label><select name="base_id" required><option value="">Выберите основу</option>${bases.map(b=>`<option value="${b.id}" ${b.id===cocktail?.base_id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}</select></div>
+    <div class="form-group"><label>Основа *</label><select name="base_id" required><option value="">Выберите основу</option>${bases.map(b=>`<option value="${b.id}" ${b.id===cocktail?.base_id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}</select><button class="button secondary small inline-add" id="new-base" type="button">＋ Добавить основу</button></div>
     <div class="form-group"><label>Фото (JPG, PNG, WEBP · до 5 МБ)</label><label class="upload"><input type="file" name="photo" accept="image/jpeg,image/png,image/webp"><strong>${cocktail?.photo?'Заменить фото':'Выбрать фото'}</strong><span id="file-name">${cocktail?.photo?'Текущее фото сохранено':'или перетащите сюда'}</span></label></div>
     ${['sweetness','acidity','strength'].map((key,i)=>`<div class="form-group"><label>${['Сладость','Кислота','Крепость'][i]}</label><div class="range-field"><input type="range" name="${key}" min="0" max="5" value="${cocktail?.[key]??[2,3,3][i]}"><output>${cocktail?.[key]??[2,3,3][i]}</output></div></div>`).join('')}
     <div class="form-group full"><label>Ингредиенты *</label><input class="field" id="ingredient-search" autocomplete="off" placeholder="Начните вводить название…"><div id="suggestions"></div><div class="chips" id="chips"></div><button class="button secondary small" id="new-ingredient" type="button" style="margin-top:12px">＋ Добавить новый ингредиент</button></div>
@@ -223,6 +261,7 @@ async function editorPage(id) {
   const form=document.querySelector('#cocktail-form');
   form.querySelectorAll('input[type=range]').forEach(r=>r.oninput=e=>e.target.nextElementSibling.value=e.target.value);
   form.photo.onchange=e=>document.querySelector('#file-name').textContent=e.target.files[0]?.name||'или перетащите сюда';
+  document.querySelector('#new-base').onclick=()=>baseModal(null,item=>{bases.push(item);state.bases=bases;const select=form.elements.base_id;select.insertAdjacentHTML('beforeend',`<option value="${item.id}">${escapeHtml(item.name)}</option>`);select.value=item.id;});
   const renderChips=()=>{document.querySelector('#chips').innerHTML=selected.map(itemId=>{const i=ingredients.find(x=>x.id===itemId);return i?`<span class="chip">${escapeHtml(i.name)}<button type="button" data-remove="${i.id}" aria-label="Удалить">×</button></span>`:''}).join('');document.querySelectorAll('[data-remove]').forEach(b=>b.onclick=e=>{selected.splice(selected.indexOf(Number(e.currentTarget.dataset.remove)),1);renderChips();});};renderChips();
   const search=document.querySelector('#ingredient-search'),suggestions=document.querySelector('#suggestions');
   search.oninput=e=>{const q=e.target.value.trim().toLowerCase();const found=q?ingredients.filter(i=>!selected.includes(i.id)&&i.name.toLowerCase().includes(q)).slice(0,7):[];suggestions.className=found.length?'suggestions':'';suggestions.innerHTML=found.map(i=>`<button class="suggestion" type="button" data-add="${i.id}">${escapeHtml(i.name)}</button>`).join('');suggestions.querySelectorAll('[data-add]').forEach(b=>b.onclick=x=>{selected.push(Number(x.currentTarget.dataset.add));search.value='';suggestions.innerHTML='';suggestions.className='';renderChips();});};
@@ -239,6 +278,7 @@ async function route() {
     if(!await guard()) return;
     if(path==='/inventory') return inventoryPage();
     if(path==='/manage') return managePage();
+    if(path==='/bases') return basesPage();
     if(path==='/editor') return editorPage(null);
     const match=path.match(/^\/editor\/(\d+)$/);if(match)return editorPage(Number(match[1]));
     location.hash='/';
