@@ -3,7 +3,9 @@ const nav = document.querySelector('#nav');
 const modalRoot = document.querySelector('#modal-root');
 const toastRoot = document.querySelector('#toast-root');
 
-const state = { admin: false, bases: [], ingredients: [], filters: { sweet: null, acid: null, strength: null, base: '' } };
+let modalEscapeHandler = null;
+
+const state = { admin: false, bases: [], ingredients: [], filters: { sweet: null, acid: null, strength: null, base: '', search: '' } };
 
 const SUPABASE_URL = 'https://oordtnwneordvusqvcds.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_UVriJo56omoyLryAnfMYHw_ASk5fRHg';
@@ -11,6 +13,20 @@ const ADMIN_EMAIL = 'homebar-admin@example.com';
 const SESSION_KEY = 'home-bar-session';
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+const normalizeText = value => String(value ?? '').trim().toLowerCase();
+const recipeBook = {
+  'Негрони': { glass:'Рокс со льдом', garnish:'Апельсиновая цедра', proportions:['Джин — 30 мл','Кампари — 30 мл','Красный вермут — 30 мл'], method:'Смешайте ингредиенты со льдом в стакане для смешивания, перелейте в рокс и украсьте цедрой.' },
+  'Бэзил Смэш': { glass:'Рокс или купе', garnish:'Верхушка базилика', proportions:['Джин — 50 мл','Лимонный сок — 25 мл','Сахарный сироп — 20 мл','Базилик — 8–10 листьев'], method:'Аккуратно разомните базилик с сиропом, добавьте джин, лимон и лёд. Встряхните и процедите.' },
+  'Эспрессо Мартини': { glass:'Охлаждённая коктейльная рюмка', garnish:'3 кофейных зерна', proportions:['Водка — 50 мл','Кофейный ликер — 25 мл','Эспрессо — 30 мл','Сахарный сироп — 10 мл'], method:'Хорошо встряхните всё со льдом до плотной пенки и процедите в охлаждённый бокал.' },
+  'Московский мул': { glass:'Медная кружка или хайбол', garnish:'Долька лайма', proportions:['Водка — 50 мл','Лаймовый сок — 15 мл','Имбирное пиво — 120 мл'], method:'Соберите напиток прямо в бокале со льдом, аккуратно перемешайте и украсьте лаймом.' },
+  'Дайкири': { glass:'Купе', garnish:'Колесо лайма', proportions:['Белый ром — 50 мл','Лаймовый сок — 25 мл','Сахарный сироп — 20 мл'], method:'Встряхните ингредиенты со льдом и процедите в охлаждённый бокал.' },
+  'Май Тай': { glass:'Рокс с дроблёным льдом', garnish:'Мята и лайм', proportions:['Белый ром — 30 мл','Темный ром — 30 мл','Апельсиновый ликер — 15 мл','Миндальный сироп — 15 мл','Лаймовый сок — 25 мл'], method:'Встряхните всё со льдом, перелейте в рокс и досыпьте дроблёный лёд.' },
+  'Маргарита': { glass:'Купе или рокс с соляной кромкой', garnish:'Долька лайма', proportions:['Текила — 50 мл','Апельсиновый ликер — 25 мл','Лаймовый сок — 25 мл'], method:'Встряхните со льдом и процедите в бокал. По желанию сделайте соляную кромку.' },
+  'Олд Фэшн': { glass:'Рокс', garnish:'Апельсиновая цедра', proportions:['Бурбон — 60 мл','Сахар — 1 кубик или 10 мл сиропа','Ангостура — 2–3 дэша'], method:'Растворите сахар с биттером, добавьте лёд и бурбон, медленно перемешайте прямо в бокале.' },
+  'Амаретто Сауэр': { glass:'Рокс', garnish:'Лимон и коктейльная вишня', proportions:['Амаретто — 50 мл','Лимонный сок — 25 мл','Сахарный сироп — 10 мл','Белок — 15 мл'], method:'Сначала встряхните без льда, затем со льдом. Процедите в рокс со свежим льдом.' },
+  'Садовый тоник': { glass:'Хайбол', garnish:'Огурец и базилик', proportions:['Тоник — 150 мл','Лайм — 2 дольки','Огурец — 3–4 слайса','Базилик — несколько листьев'], method:'Соберите в бокале со льдом, слегка прижмите лайм и базилик, долейте тоник.' },
+  'Апероль Шпритц': { glass:'Большой винный бокал', garnish:'Долька апельсина', proportions:['Игристое вино — 90 мл','Апероль — 60 мл','Газированная вода — 30 мл'], method:'Наполните бокал льдом, влейте игристое, Апероль и воду. Легко перемешайте.' }
+};
 
 const storedSession = () => {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; }
@@ -142,8 +158,18 @@ function settingsModal() {
   modalRoot.querySelector('[data-close]').onclick=closeModal;
   modalRoot.querySelector('form').onsubmit=async e=>{e.preventDefault();const fd=new FormData(e.currentTarget),error=e.currentTarget.querySelector('.error-text');if(fd.get('password')!==fd.get('confirm')){error.textContent='Пароли не совпадают';return;}try{await request('/api/password',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:fd.get('password')})});closeModal();toast('Пароль обновлён');}catch(err){error.textContent=err.message;}};
 }
-function showModal(content) { modalRoot.innerHTML = `<div class="modal-backdrop"><div class="modal">${content}</div></div>`; }
-function closeModal() { modalRoot.innerHTML = ''; }
+function showModal(content, wide = false) {
+  if (modalEscapeHandler) document.removeEventListener('keydown', modalEscapeHandler);
+  modalRoot.innerHTML = `<div class="modal-backdrop"><div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">${content}</div></div>`;
+  modalRoot.querySelector('.modal-backdrop').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
+  modalEscapeHandler = e => { if (e.key === 'Escape') closeModal(); };
+  document.addEventListener('keydown', modalEscapeHandler);
+}
+function closeModal() {
+  modalRoot.innerHTML = '';
+  if (modalEscapeHandler) document.removeEventListener('keydown', modalEscapeHandler);
+  modalEscapeHandler = null;
+}
 function loginModal() {
   showModal(`<p class="eyebrow">Только для хозяев</p><h2>Вход в бар</h2><p>Управляйте меню и отмечайте, что закончилось на полке.</p>
     <form id="login-form"><input class="field" type="password" name="password" placeholder="Пароль" autofocus required><p class="error-text"></p><div class="modal-actions"><button class="button secondary" type="button" data-close>Отмена</button><button class="button">Войти</button></div></form>`);
@@ -167,7 +193,26 @@ function cocktailCard(c, index) {
   return `<article class="cocktail-card" style="animation-delay:${Math.min(index*55,330)}ms;--glow:${colors[c.base]||'#b97747'}">
     <div class="card-image">${c.photo?`<img src="${escapeHtml(c.photo)}" alt="${escapeHtml(c.name)}">`:''}<span class="base-pill">${escapeHtml(c.base)}</span></div>
     <div class="card-body"><h3>${escapeHtml(c.name)}</h3><p class="ingredients">${c.ingredients.map(x=>escapeHtml(x.name)).join(' · ')}</p>
-      <div class="card-meta"><span>КРЕПОСТЬ</span><span class="drops" aria-label="Крепость ${c.strength} из 5">${drops}</span></div></div></article>`;
+      <div class="card-meta"><span>КРЕПОСТЬ</span><span class="drops" aria-label="Крепость ${c.strength} из 5">${drops}</span></div><button class="details-button" type="button" data-cocktail="${c.id}" aria-label="Открыть рецепт ${escapeHtml(c.name)}">Рецепт</button></div></article>`;
+}
+function scorePill(label,value){return `<span><b>${label}</b>${'◆'.repeat(value)}${'◇'.repeat(5-value)}</span>`;}
+function cocktailDetailsModal(c) {
+  const recipe = recipeBook[c.name] || {
+    glass:'Любимый бокал',
+    garnish:'По настроению',
+    proportions:c.ingredients.map(i=>`${i.name} — по вкусу`),
+    method:'Подготовьте ингредиенты, охладите бокал и смешайте напиток в стиле, который лучше подходит рецепту: встряхните с соками или перемешайте прозрачные крепкие ингредиенты со льдом.'
+  };
+  showModal(`<div class="detail-head"><div><p class="eyebrow">${escapeHtml(c.base)}</p><h2>${escapeHtml(c.name)}</h2></div><button class="icon-button" type="button" data-close aria-label="Закрыть">×</button></div>
+    <div class="detail-grid">
+      <section><h3>Пропорции</h3><ul class="detail-list">${recipe.proportions.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul></section>
+      <section><h3>Профиль</h3><div class="score-list">${scorePill('Сладость',c.sweetness)}${scorePill('Кислота',c.acidity)}${scorePill('Крепость',c.strength)}</div></section>
+      <section class="full"><h3>Как готовить</h3><p>${escapeHtml(recipe.method)}</p></section>
+      <section><h3>Бокал</h3><p>${escapeHtml(recipe.glass)}</p></section>
+      <section><h3>Украшение</h3><p>${escapeHtml(recipe.garnish)}</p></section>
+      <section class="full"><h3>Ингредиенты в меню</h3><p class="ingredients">${c.ingredients.map(x=>escapeHtml(x.name)).join(' · ')}</p></section>
+    </div>`, true);
+  modalRoot.querySelector('[data-close]').onclick=closeModal;
 }
 async function loadCocktails() {
   const grid = document.querySelector('#cocktails'); if (!grid) return;
@@ -176,9 +221,12 @@ async function loadCocktails() {
   for (const key of ['sweet','acid','strength']) if (state.filters[key] !== null) query.set(key,state.filters[key]);
   if (state.filters.base) query.set('base',state.filters.base);
   try {
-    const rows = await request(`/api/cocktails?${query}`);
+    let rows = await request(`/api/cocktails?${query}`);
+    const search = normalizeText(state.filters.search);
+    if (search) rows = rows.filter(c => [c.name,c.base,...c.ingredients.map(i=>i.name)].some(value => normalizeText(value).includes(search)));
     document.querySelector('#result-count').textContent = `${rows.length} ${plural(rows.length,'вариант','варианта','вариантов')}`;
     grid.innerHTML = rows.length ? rows.map(cocktailCard).join('') : `<div class="empty"><b>Сегодня не сложилось</b>К сожалению, под такие параметры ничего нет.<br>Попробуйте изменить фильтры.</div>`;
+    document.querySelectorAll('[data-cocktail]').forEach(btn=>btn.onclick=e=>cocktailDetailsModal(rows.find(c=>c.id===Number(e.currentTarget.dataset.cocktail))));
   } catch(err) { grid.innerHTML=`<div class="empty"><b>Не удалось открыть меню</b>${escapeHtml(err.message)}</div>`; }
 }
 function plural(n,one,few,many){n=Math.abs(n)%100;const n1=n%10;return n>10&&n<20?many:n1>1&&n1<5?few:n1===1?one:many;}
@@ -192,6 +240,7 @@ async function homePage() {
     ${rangeControl('strength','Крепость',state.filters.strength ?? values.strength,'0%','крепко')}
     <div class="filter-control"><div class="filter-head"><label for="base">Основа</label><span class="filter-value">◈</span></div><select id="base"><option value="">Любая основа</option>${state.bases.map(b=>`<option value="${b.id}" ${String(b.id)===String(state.filters.base)?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}</select></div>
   </section>
+  <section class="search-panel" aria-label="Поиск по меню"><input class="field" id="cocktail-search" type="search" value="${escapeHtml(state.filters.search)}" placeholder="Найти коктейль, основу или ингредиент…"><button class="button secondary" id="reset-filters" type="button">Сбросить фильтры</button></section>
   <div class="results-head"><div><p class="eyebrow">Подходит под настроение</p><h2>Коктейли</h2></div><span class="count" id="result-count"></span></div><section class="cocktail-grid" id="cocktails"></section>`;
   document.querySelectorAll('[data-enable]').forEach(toggle => toggle.addEventListener('change', e => {
     const key=e.target.dataset.enable; const range=document.querySelector(`[data-range="${key}"]`); range.disabled=!e.target.checked;
@@ -199,6 +248,8 @@ async function homePage() {
   }));
   document.querySelectorAll('[data-range]').forEach(range=>range.addEventListener('input',e=>{const key=e.target.dataset.range;state.filters[key]=Number(e.target.value);document.querySelector(`[data-value="${key}"]`).textContent=e.target.value;loadCocktails();}));
   document.querySelector('#base').onchange=e=>{state.filters.base=e.target.value;loadCocktails();};
+  document.querySelector('#cocktail-search').oninput=e=>{state.filters.search=e.target.value;loadCocktails();};
+  document.querySelector('#reset-filters').onclick=()=>{state.filters={sweet:null,acid:null,strength:null,base:'',search:''};homePage();};
   await loadCocktails();
 }
 
